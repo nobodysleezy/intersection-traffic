@@ -1,0 +1,9 @@
+.venv/
+Ultralytics/
+runs/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.pt
+.thumb.jpg
+.streamlit/secrets.toml
