@@ -12,8 +12,9 @@ import cv2
 from traffic_dashboard.annotate import annotate
 from traffic_dashboard.capture import YouTubeCapture
 from traffic_dashboard.config import RuntimeConfig, Stats
-from traffic_dashboard.counter import LineCounter
+from traffic_dashboard.counter import ApproachCounter
 from traffic_dashboard.detector import VehicleTracker
+from traffic_dashboard.people import PeopleCounter
 from traffic_dashboard.traffic_light import RedPhaseTracker, crop_light, red_ratio
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,15 @@ class Pipeline:
         self._reset.set()
 
     def _publish(self, frame_bgr, stats: Stats) -> None:
+        if frame_bgr.shape[1] > 960:
+            scale = 960 / frame_bgr.shape[1]
+            frame_bgr = cv2.resize(
+                frame_bgr,
+                (960, int(frame_bgr.shape[0] * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
         ok, encoded = cv2.imencode(
-            ".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+            ".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
         )
         payload = encoded.tobytes() if ok else None
         with self._lock:
@@ -98,32 +106,36 @@ class Pipeline:
             else:
                 self._tracker.reset()
             device = self._tracker.device
-            counter = LineCounter()
+            counter = ApproachCounter()
+            people = PeopleCounter()
             phases = RedPhaseTracker()
             self._set_status("Live")
 
             while not self._stop.is_set():
                 if self._reset.is_set():
                     counter.reset()
+                    people.reset()
                     phases.reset()
                     self._reset.clear()
 
-                frame = capture.read()
+                frame = capture.read(timeout=0.5)
                 if frame is None:
-                    misses += 1
-                    if misses >= 20:
-                        self._set_status("Reconnecting")
-                        capture.reconnect()
-                        misses = 0
+                    if not capture.alive:
+                        misses += 1
+                        if misses >= 3:
+                            self._set_status("Reconnecting")
+                            capture.reconnect()
+                            misses = 0
                     continue
                 misses = 0
 
                 with self._lock:
                     config = self._config
 
+                height, width = frame.shape[:2]
                 tracks = self._tracker.track(frame, config.classes, config.confidence)
-                line_y = int(config.line_y * frame.shape[0])
-                counter.update(tracks, line_y, config.direction)
+                vehicles = counter.update(tracks, width, height, config.zone_shift)
+                pedestrians = people.update(tracks, width, height, config.zone_shift)
 
                 roi, light_box = crop_light(frame, config)
                 ratio = 0.0
@@ -140,18 +152,23 @@ class Pipeline:
 
                 annotated = annotate(
                     frame,
-                    tracks,
-                    line_y,
+                    vehicles + pedestrians,
+                    counter.counts.tags,
                     light_box,
                     phases.active,
-                    counter.total,
+                    (counter.counts.left, counter.counts.straight, counter.counts.right, people.total),
+                    config.zone_shift,
                     mask if config.show_red_mask else None,
                 )
                 durations = list(phases.durations[-12:])
                 self._publish(
                     annotated,
                     Stats(
-                        cars_passed=counter.total,
+                        cars_passed=counter.counts.total,
+                        left_turns=counter.counts.left,
+                        straight=counter.counts.straight,
+                        right_turns=counter.counts.right,
+                        people_passed=people.total,
                         red_appearances=phases.appearances,
                         red_durations=durations,
                         red_active=phases.active,
@@ -162,7 +179,7 @@ class Pipeline:
                         fps=fps,
                         device=device,
                         status="Live",
-                        tracks=len(tracks),
+                        tracks=len(vehicles) + len(pedestrians),
                     ),
                 )
         except Exception as exc:

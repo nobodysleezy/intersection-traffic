@@ -12,7 +12,11 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from traffic_dashboard.config import VEHICLE_CLASS_IDS
+from pathlib import Path
+
+from traffic_dashboard.config import PERSON_CLASS_ID, VEHICLE_CLASS_IDS
+
+_TRACKER = str(Path(__file__).with_name("bytetrack.yaml"))
 
 
 @dataclass
@@ -59,6 +63,7 @@ class VehicleTracker:
             for name in class_names
             if name in VEHICLE_CLASS_IDS
         ]
+        class_ids.append(PERSON_CLASS_ID)
         if not class_ids:
             return []
 
@@ -67,10 +72,10 @@ class VehicleTracker:
             persist=True,
             device=self.device,
             classes=class_ids,
-            conf=confidence,
+            conf=min(confidence, 0.2),
             iou=0.5,
             imgsz=640,
-            tracker="bytetrack.yaml",
+            tracker=_TRACKER,
             verbose=False,
             half=False,
         )
@@ -88,6 +93,11 @@ class VehicleTracker:
         for track_id, box, conf, cls_id in zip(ids, xyxy, confs, clss):
             x1, y1, x2, y2 = (int(v) for v in box)
             label = str(self._names.get(cls_id, cls_id))
+            if label == "person":
+                if conf < 0.22:
+                    continue
+            elif conf < confidence:
+                continue
             tracks.append(
                 Track(
                     track_id=int(track_id),
