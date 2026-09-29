@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 DEFAULT_STREAM_URL = "https://www.youtube.com/watch?v=0Ua8_c0Nphg"
 
 # COCO class ids used by YOLOv8.
+PERSON_CLASS_ID = 0
 VEHICLE_CLASS_IDS = {
     "car": 2,
     "motorcycle": 3,
@@ -28,6 +29,7 @@ class RuntimeConfig:
 
     line_y: float = DEFAULT_LINE_Y
     direction: str = "both"
+    zone_shift: float = 0.0
     light_x: float = DEFAULT_LIGHT_ROI[0]
     light_y: float = DEFAULT_LIGHT_ROI[1]
     light_w: float = DEFAULT_LIGHT_ROI[2]
@@ -43,6 +45,10 @@ class RuntimeConfig:
 @dataclass
 class Stats:
     cars_passed: int = 0
+    left_turns: int = 0
+    straight: int = 0
+    right_turns: int = 0
+    people_passed: int = 0
     red_appearances: int = 0
     red_durations: list[float] = field(default_factory=list)
     red_active: bool = False

@@ -12,7 +12,6 @@ import streamlit as st
 
 from traffic_dashboard.config import (
     DEFAULT_LIGHT_ROI,
-    DEFAULT_LINE_Y,
     DEFAULT_STREAM_URL,
     VEHICLE_CLASS_IDS,
     RuntimeConfig,
@@ -45,7 +44,7 @@ pipeline = _pipeline()
 
 st.title("Intersection traffic")
 st.caption(
-    "Live count of vehicles crossing a line, plus red-light timing from the Zlín street camera."
+    "Counts the four lanes on the near approach, people on the crosswalks, and the red light. Parked cars are ignored."
 )
 
 with st.sidebar:
@@ -62,17 +61,12 @@ with st.sidebar:
     if st.button("Reset counts", use_container_width=True):
         pipeline.reset_counts()
 
-    st.header("Counting line")
-    line_y = st.slider("Line position", 0.05, 0.95, DEFAULT_LINE_Y, 0.01)
-    direction = st.selectbox(
-        "Count direction",
-        ["both", "down", "up"],
-        format_func=lambda value: {
-            "both": "Both directions",
-            "down": "Down the frame",
-            "up": "Up the frame",
-        }[value],
+    st.header("Lanes")
+    st.caption(
+        "From the left: left only, left or straight, straight, right. "
+        "The red outline is the parking lot and is not counted."
     )
+    zone_shift = st.slider("Nudge lanes", -0.08, 0.08, 0.0, 0.005)
 
     st.header("Traffic light")
     st.caption("Drag the box until it covers one signal head.")
@@ -93,8 +87,7 @@ with st.sidebar:
 
 pipeline.update_config(
     RuntimeConfig(
-        line_y=line_y,
-        direction=direction,
+        zone_shift=zone_shift,
         light_x=light_x,
         light_y=light_y,
         light_w=light_w,
@@ -111,13 +104,17 @@ pipeline.update_config(
 def live_view() -> None:
     frame, stats = pipeline.snapshot()
     cards = st.columns(4)
-    cards[0].metric("Cars passed", stats.cars_passed)
-    cards[1].metric("Red light count", stats.red_appearances)
+    cards[0].metric("Left turn", stats.left_turns)
+    cards[1].metric("Straight", stats.straight)
+    cards[2].metric("Right turn", stats.right_turns)
+    cards[3].metric("People", stats.people_passed)
+    lights = st.columns(3)
+    lights[0].metric("Red light count", stats.red_appearances)
     if stats.red_active:
-        cards[2].metric("Red light now", _seconds(stats.current_red_duration))
+        lights[1].metric("Red light now", _seconds(stats.current_red_duration))
     else:
-        cards[2].metric("Last red light", _seconds(stats.last_red_duration))
-    cards[3].metric("Average red light", _seconds(stats.average_red_duration))
+        lights[1].metric("Last red light", _seconds(stats.last_red_duration))
+    lights[2].metric("Average red light", _seconds(stats.average_red_duration))
 
     if stats.error:
         st.error(stats.error)

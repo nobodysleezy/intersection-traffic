@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+import time
 
 import numpy as np
 from imageio_ffmpeg import get_ffmpeg_exe
@@ -16,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 FRAME_W = 1280
 FRAME_H = 720
-# Eight frames per second keeps YOLOv8 on MPS near real time.
-_FPS = 8
+# Decode a bit faster than inference. The reader keeps only the newest frame,
+# so a slow detector never falls behind the live camera.
+_FPS = 12
 
 _HEIGHT = {"720p": 720, "480p": 480, "360p": 360, "best": 720}
 
@@ -92,6 +94,12 @@ class YouTubeCapture:
         self.url = url
         self.quality = quality
         self._ff: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+        self._stop_reader = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: np.ndarray | None = None
+        self._seq = 0
+        self._consumed = -1
         self._stderr: list[str] = []
         self._frame_bytes = FRAME_W * FRAME_H * 3
         self.open()
@@ -128,6 +136,8 @@ class YouTubeCapture:
             stderr=subprocess.PIPE,
         )
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self._reader = threading.Thread(target=self._pump, name="frame-pump", daemon=True)
+        self._reader.start()
 
     def _drain_stderr(self) -> None:
         proc = self._ff
@@ -139,7 +149,17 @@ class YouTubeCapture:
                 self._stderr.append(text)
                 del self._stderr[:-8]
 
-    def read(self) -> np.ndarray | None:
+    def _pump(self) -> None:
+        """Keep the newest frame only, so inference cannot build a backlog."""
+        while not self._stop_reader.is_set():
+            frame = self._read_raw()
+            if frame is None:
+                return
+            with self._lock:
+                self._latest = frame
+                self._seq += 1
+
+    def _read_raw(self) -> np.ndarray | None:
         proc = self._ff
         if proc is None or proc.stdout is None:
             return None
@@ -151,18 +171,43 @@ class YouTubeCapture:
         frame = np.frombuffer(raw, dtype=np.uint8).reshape((FRAME_H, FRAME_W, 3))
         return frame.copy()
 
+    @property
+    def alive(self) -> bool:
+        proc = self._ff
+        return proc is not None and proc.poll() is None
+
+    def read(self, timeout: float = 2.0) -> np.ndarray | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._stop_reader.is_set():
+            with self._lock:
+                if self._latest is not None and self._seq != self._consumed:
+                    self._consumed = self._seq
+                    return self._latest.copy()
+            if not self.alive:
+                return None
+            time.sleep(0.01)
+        return None
+
     def reconnect(self) -> None:
         logger.info("Reconnecting to the live stream")
         self.open()
 
     def close(self) -> None:
+        self._stop_reader.set()
         proc = self._ff
         self._ff = None
-        if proc is None:
-            return
-        if proc.poll() is None:
+        if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        reader = self._reader
+        if reader is not None and reader.is_alive() and reader is not threading.current_thread():
+            reader.join(timeout=1.5)
+        self._reader = None
+        self._stop_reader.clear()
+        with self._lock:
+            self._latest = None
+            self._seq = 0
+            self._consumed = -1
